@@ -1,6 +1,7 @@
-# VirusTotal File Scanner
+# Safer
 
 Command-line tool to scan files with VirusTotal API. Extracts archives only if safe.
+I made this for my personal use for automating the processes of scanning downloaded archive files with VirusTotal and extracting.
 
 ## Quick Start
 
