@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VirusTotal File Scanner - Smart scanning that avoids unnecessary uploads
+VirusTotal Archive Scanner - Scan archive files with optimal safety and efficiency
 """
 
 import sys
@@ -11,6 +11,7 @@ import tempfile
 import shutil
 import requests
 import time
+import stat
 import hashlib
 
 
@@ -19,141 +20,89 @@ class VirusTotalScanner:
         self.api_key = api_key
         self.base_url = "https://www.virustotal.com/api/v3"
         self.headers = {
-            "x-apikey": self.api_key,
+            "x-apikey": api_key,
             "User-Agent": "VirusTotal-CLI/1.0"
         }
         self.large_file_threshold = 32 * 1024 * 1024  # 32MB
 
     def calculate_file_hash(self, file_path):
-        """Calculate SHA-256 hash of a file locally"""
+        """Calculate SHA-256 hash of an archive file locally (SAFE for archives)"""
         sha256_hash = hashlib.sha256()
-        with open(file_path, "rb") as f:
-            # Read file in chunks to handle large files
-            for byte_block in iter(lambda: f.read(4096), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
+        try:
+            with open(file_path, "rb") as f:
+                # Read file in chunks to handle large files
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            return sha256_hash.hexdigest()
+        except Exception as e:
+            print(f"Error calculating hash: {e}")
+            return None
 
     def scan_file(self, file_path):
-        """Main method to scan a file - tries to avoid re-uploading"""
+        """Main method to scan an archive file - optimized like VirusTotal web interface"""
         file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
 
         print(f"File: {filename}")
         print(f"Size: {self._format_size(file_size)}")
-
-        # Calculate hash locally first
-        print("Calculating file hash...")
-        file_hash = self.calculate_file_hash(file_path)
-        print(f"File SHA-256: {file_hash}")
-
         print("\n" + "="*60)
 
-        # Step 1: First check if file already exists in VirusTotal
+        # Step 1: Calculate hash locally (SAFE for archives)
+        print("Calculating file hash (safe for archives)...")
+        file_hash = self.calculate_file_hash(file_path)
+        
+        if not file_hash:
+            print("Failed to calculate hash, uploading file directly...")
+            return self._upload_and_scan(file_path, file_size)
+        
+        print(f"File SHA-256: {file_hash}")
+        
+        # Step 2: Check if file already exists in VirusTotal database
         print("Checking if file exists in VirusTotal database...")
         existing_analysis = self._get_existing_analysis(file_hash)
-
+        
         if existing_analysis:
-            print("File found in database! Using existing analysis.")
+            print("✓ File found in database! Using existing analysis.")
             return file_hash, existing_analysis, True
-
-        # Step 2: File doesn't exist, upload it
+        
+        # Step 3: File doesn't exist, upload it
         print("File not found in database. Uploading for analysis...")
-        result = self._upload_file(file_path, file_size)
+        return self._upload_and_scan(file_path, file_size, file_hash)
 
-        if not result:
-            return None, None, False
-
-        analysis_id, uploaded_hash, analysis_data = result
-
-        if analysis_data:
-            # We got analysis data immediately
-            return uploaded_hash or file_hash, analysis_data, False
-        elif analysis_id:
-            # Need to wait for analysis
-            print("Waiting for new analysis...")
-            analysis_data = self._get_analysis_results(analysis_id)
-            return uploaded_hash or file_hash, analysis_data, False
-        else:
-            return None, None, False
-
-    def _get_existing_analysis(self, file_hash):
-        """Get existing analysis for a file hash"""
-        try:
-            print(f"Fetching analysis for hash: {file_hash}")
-            response = requests.get(
-                f"{self.base_url}/files/{file_hash}",
-                headers=self.headers,
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-
-                # Extract analysis from file info
-                if 'data' in data and 'attributes' in data['data']:
-                    attributes = data['data']['attributes']
-
-                    # Check if we have analysis results
-                    if 'last_analysis_results' in attributes or 'results' in attributes:
-                        print("Found existing analysis in database")
-
-                        # IMPORTANT: We need to restructure the data to match what display_results expects
-                        # VirusTotal file info response has different structure than analysis response
-                        analysis_data = {
-                            'data': {
-                                'id': data['data']['id'],
-                                'attributes': {
-                                    'status': 'completed',
-                                    'stats': attributes.get('last_analysis_stats', {}),
-                                    'results': attributes.get('last_analysis_results', {}),
-                                    # Also include date fields for display
-                                    'last_analysis_date': attributes.get('last_analysis_date'),
-                                    'last_modification_date': attributes.get('last_modification_date'),
-                                    'first_submission_date': attributes.get('first_submission_date'),
-                                    'last_submission_date': attributes.get('last_submission_date')
-                                }
-                            }
-                        }
-
-                        # If we have results but no stats, calculate stats
-                        if not analysis_data['data']['attributes']['stats'] and analysis_data['data']['attributes']['results']:
-                            results = analysis_data['data']['attributes']['results']
-                            stats = self._calculate_stats_from_results(results)
-                            analysis_data['data']['attributes']['stats'] = stats
-
-                        return analysis_data
-                    else:
-                        print("File exists but no analysis results available")
-                        return None
-                else:
-                    print("Unexpected response format")
-                    return None
-            elif response.status_code == 404:
-                print("File not found in VirusTotal database")
-                return None
-            else:
-                print(f"Failed to get file info: {response.status_code}")
-                return None
-
-        except Exception as e:
-            print(f"Error getting existing analysis: {e}")
-            return None
-
-    def _upload_file(self, file_path, file_size):
-        """Upload file to VirusTotal and return (analysis_id, file_hash, analysis_data)"""
+    def _upload_and_scan(self, file_path, file_size, known_hash=None):
+        """Upload file and get analysis results"""
         filename = os.path.basename(file_path)
 
         print(f"Uploading: {filename}...")
 
         try:
             if file_size <= self.large_file_threshold:
-                return self._upload_small_file(file_path)
+                result = self._upload_small_file(file_path)
             else:
-                return self._upload_large_file(file_path, file_size)
+                result = self._upload_large_file(file_path, file_size)
+
+            if not result:
+                return None, None, False
+
+            analysis_id, uploaded_hash, analysis_data = result
+            
+            # Use the hash we know or the one from upload
+            final_hash = known_hash or uploaded_hash
+
+            if analysis_data:
+                # We got analysis data immediately
+                return final_hash, analysis_data, False
+            elif analysis_id:
+                # Need to wait for analysis
+                print("Waiting for new analysis...")
+                analysis_data = self._get_analysis_results(analysis_id)
+                return final_hash, analysis_data, False
+            else:
+                return None, None, False
 
         except Exception as e:
             print(f"Upload error: {e}")
-            return None
+            return None, None, False
 
     def _upload_small_file(self, file_path):
         """Upload files <= 32MB directly"""
@@ -180,7 +129,6 @@ class VirusTotalScanner:
         print(f"Large file detected ({self._format_size(
             file_size)}), getting upload URL...")
 
-        # Step 1: Get upload URL for large file
         try:
             response = requests.get(
                 f"{self.base_url}/files/upload_url",
@@ -199,7 +147,6 @@ class VirusTotalScanner:
             print(f"Error getting upload URL: {e}")
             return None
 
-        # Step 2: Upload file to the special URL
         try:
             with open(file_path, 'rb') as f:
                 files = {'file': (filename, f)}
@@ -217,30 +164,27 @@ class VirusTotalScanner:
             return None
 
     def _handle_upload_response(self, response):
-        """Handle upload response - extract analysis ID, hash, and check for immediate analysis"""
+        """Handle upload response"""
         print(f"Response status: {response.status_code}")
 
         if response.status_code == 200:
             try:
                 data = response.json()
 
-                # Extract analysis ID
                 analysis_id = None
                 if 'data' in data and 'id' in data['data']:
                     analysis_id = data['data']['id']
 
-                # Extract file hash
                 file_hash = self._extract_hash_from_response(data)
 
-                # Check if we have immediate analysis results
+                # Check for immediate results
                 analysis_data = None
                 if 'data' in data and 'attributes' in data['data']:
                     attributes = data['data']['attributes']
 
-                    # Check for analysis results
                     if 'results' in attributes or 'last_analysis_results' in attributes:
-                        print("File uploaded and analysis available immediately")
-
+                        print("✓ File uploaded with immediate analysis results")
+                        
                         analysis_data = {
                             'data': {
                                 'id': analysis_id or 'immediate',
@@ -252,7 +196,6 @@ class VirusTotalScanner:
                             }
                         }
 
-                        # Calculate stats if needed
                         if not analysis_data['data']['attributes']['stats'] and analysis_data['data']['attributes']['results']:
                             results = analysis_data['data']['attributes']['results']
                             analysis_data['data']['attributes']['stats'] = self._calculate_stats_from_results(
@@ -263,7 +206,7 @@ class VirusTotalScanner:
                 else:
                     print(f"Upload successful. Analysis ID: {analysis_id}")
                     if file_hash:
-                        print(f"File SHA-256: {file_hash}")
+                        print(f"File SHA-256 (from VirusTotal): {file_hash}")
                     return analysis_id, file_hash, None
 
             except Exception as e:
@@ -271,9 +214,7 @@ class VirusTotalScanner:
                 return None
 
         elif response.status_code == 409:
-            # File already exists in VirusTotal database
             print("File already exists in VirusTotal database")
-            print("Note: This should not happen since we check hash first")
             return None
 
         else:
@@ -290,8 +231,7 @@ class VirusTotalScanner:
             return None
 
     def _extract_hash_from_response(self, data):
-        """Extract file hash from response data"""
-        # Try multiple possible locations
+        """Extract file hash from successful response data"""
         locations = [
             ['data', 'attributes', 'sha256'],
             ['data', 'attributes', 'file_info', 'sha256'],
@@ -310,6 +250,50 @@ class VirusTotalScanner:
                 continue
 
         return None
+
+    def _get_existing_analysis(self, file_hash):
+        """Get existing analysis for a file hash"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/files/{file_hash}",
+                headers=self.headers,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+
+                if 'data' in data and 'attributes' in data['data']:
+                    attributes = data['data']['attributes']
+
+                    if 'last_analysis_results' in attributes or 'results' in attributes:
+                        analysis_data = {
+                            'data': {
+                                'id': data['data']['id'],
+                                'attributes': {
+                                    'status': 'completed',
+                                    'stats': attributes.get('last_analysis_stats', {}),
+                                    'results': attributes.get('last_analysis_results', {}),
+                                    'last_analysis_date': attributes.get('last_analysis_date'),
+                                    'last_modification_date': attributes.get('last_modification_date'),
+                                    'first_submission_date': attributes.get('first_submission_date'),
+                                    'last_submission_date': attributes.get('last_submission_date')
+                                }
+                            }
+                        }
+
+                        if not analysis_data['data']['attributes']['stats'] and analysis_data['data']['attributes']['results']:
+                            results = analysis_data['data']['attributes']['results']
+                            stats = self._calculate_stats_from_results(results)
+                            analysis_data['data']['attributes']['stats'] = stats
+
+                        return analysis_data
+                    
+            return None
+
+        except Exception as e:
+            print(f"Error checking existing analysis: {e}")
+            return None
 
     def _calculate_stats_from_results(self, results):
         """Calculate stats from analysis results"""
@@ -337,7 +321,7 @@ class VirusTotalScanner:
         """Get analysis results for an analysis ID"""
         print(f"Getting analysis results for ID: {analysis_id}")
 
-        max_attempts = 30  # 5 minutes max
+        max_attempts = 30
         for attempt in range(max_attempts):
             try:
                 response = requests.get(
@@ -357,7 +341,7 @@ class VirusTotalScanner:
                         elif attempt == 0:
                             print(
                                 f"Status: {status} (checking every 10 seconds)")
-                        elif (attempt + 1) % 3 == 0:  # Update every 30 seconds
+                        elif (attempt + 1) % 3 == 0:
                             print(f"Still analyzing... ({
                                   attempt + 1}/30 attempts)")
                     else:
@@ -387,22 +371,17 @@ class VirusTotalScanner:
             if 'data' in analysis_data and 'attributes' in analysis_data['data']:
                 attributes = analysis_data['data']['attributes']
 
-                # Get results
                 results = attributes.get('results', {})
                 if not results:
                     results = attributes.get('last_analysis_results', {})
 
-                # Get stats
                 stats = attributes.get('stats', {})
                 if not stats:
                     stats = attributes.get('last_analysis_stats', {})
                 if not stats and results:
                     stats = self._calculate_stats_from_results(results)
 
-                # Get last analysis date - check multiple possible locations
                 last_analysis_date = "Not available"
-
-                # Check for timestamp in various possible locations
                 date_fields = ['last_analysis_date', 'last_modification_date',
                                'first_submission_date', 'last_submission_date']
 
@@ -412,13 +391,11 @@ class VirusTotalScanner:
                         if timestamp:
                             try:
                                 import datetime
-                                # Convert UNIX timestamp to readable date
                                 last_analysis_date = datetime.datetime.fromtimestamp(
                                     int(timestamp)
                                 ).strftime('%Y-%m-%d %H:%M:%S Local time')
                                 break
                             except:
-                                # If conversion fails, show raw value
                                 last_analysis_date = str(timestamp)
                                 break
 
@@ -451,7 +428,6 @@ class VirusTotalScanner:
                     print(f"  Harmless: {stats.get('harmless', 0)}")
                     print(f"  Undetected: {stats.get('undetected', 0)}")
 
-                    # Show top detections
                     print("\nDETECTION DETAILS:")
                     detection_count = 0
                     for vendor, result in results.items():
@@ -517,7 +493,6 @@ def check_7z_installed():
 
 def extract_archive(archive_path, extract_dir=None):
     """Extract archive using 7z command-line tool"""
-
     if not check_7z_installed():
         print("Error: 7z is not installed or not in PATH")
         print("Please install 7-Zip:")
@@ -527,7 +502,6 @@ def extract_archive(archive_path, extract_dir=None):
         print("  macOS: brew install p7zip")
         return None
 
-    # Determine archive type
     archive_ext = os.path.splitext(archive_path)[1].lower()
     supported_extensions = ['.zip', '.7z', '.rar']
 
@@ -536,7 +510,6 @@ def extract_archive(archive_path, extract_dir=None):
         print(f"Supported formats: {', '.join(supported_extensions)}")
         return None
 
-    # Create extraction directory
     if extract_dir is None:
         extract_dir = tempfile.mkdtemp(prefix="vt_extract_")
         is_temp = True
@@ -548,17 +521,15 @@ def extract_archive(archive_path, extract_dir=None):
     print(f"Destination: {extract_dir}")
 
     try:
-        # Extract using 7z
         result = subprocess.run(
             ['7z', 'x', archive_path, f'-o{extract_dir}', '-y'],
             capture_output=True,
             text=True,
             check=False,
-            timeout=60  # 60 second timeout for extraction
+            timeout=60
         )
 
         if result.returncode == 0:
-            # List extracted files
             extracted_files = []
             total_size = 0
 
@@ -574,7 +545,6 @@ def extract_archive(archive_path, extract_dir=None):
                 print(f"Extracted {len(extracted_files)} file(s), total: {
                       format_bytes(total_size)}")
 
-                # Show file list
                 print("\nExtracted files (first 10):")
                 for i, file_path in enumerate(extracted_files[:10]):
                     rel_path = os.path.relpath(file_path, extract_dir)
@@ -587,7 +557,6 @@ def extract_archive(archive_path, extract_dir=None):
                 return extract_dir
             else:
                 print("No files found after extraction")
-                # Clean up empty temp directory
                 if is_temp:
                     try:
                         shutil.rmtree(extract_dir)
@@ -608,6 +577,129 @@ def extract_archive(archive_path, extract_dir=None):
     except Exception as e:
         print(f"Extraction error: {e}")
         return None
+
+
+def unblock_files_and_dirs(path):
+    """
+    Set full permissions on files and directories.
+    Linux: chmod ug+rwx (user and group read/write/execute)
+    Windows: icacls (grant full control)
+    """
+    print(f"Setting permissions on: {path}")
+    
+    if not os.path.exists(path):
+        print(f"Warning: Path does not exist: {path}")
+        return False
+    
+    try:
+        if sys.platform.startswith('win'):
+            # Windows: Grant full control to current user
+            username = os.getlogin()
+            
+            # Use icacls command
+            cmd = f'icacls "{path}" /grant "{username}:(OI)(CI)F" /T /Q'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                print(f"Windows permissions set for user '{username}'")
+                return True
+            else:
+                print(f"Windows permission setting failed: {result.stderr}")
+                
+                # Fallback: Try basic Python method
+                try:
+                    # Make writable using Python
+                    os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                    
+                    # If it's a directory, apply recursively
+                    if os.path.isdir(path):
+                        for root, dirs, files in os.walk(path):
+                            for dir_name in dirs:
+                                dir_path = os.path.join(root, dir_name)
+                                os.chmod(dir_path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                            for file_name in files:
+                                file_path = os.path.join(root, file_name)
+                                os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                    
+                    print("Fallback permissions set (basic Python method)")
+                    return True
+                    
+                except Exception as e:
+                    print(f"Fallback permission setting failed: {e}")
+                    return False
+                    
+        else:
+            # Linux/macOS: Use chmod
+            # First set permissions on the item itself
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR |  # User: rwx
+                             stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP)  # Group: rwx
+            
+            # If it's a directory, apply recursively
+            if os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    for dir_name in dirs:
+                        dir_path = os.path.join(root, dir_name)
+                        os.chmod(dir_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR |
+                                         stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP)
+                    for file_name in files:
+                        file_path = os.path.join(root, file_name)
+                        # For files, keep execute bit only if it was already executable
+                        current_mode = os.stat(file_path).st_mode
+                        new_mode = (stat.S_IRUSR | stat.S_IWUSR |  # User: rw
+                                    stat.S_IRGRP | stat.S_IWGRP)   # Group: rw
+                        
+                        # Preserve execute bits if they exist
+                        if current_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                            new_mode |= (stat.S_IXUSR | stat.S_IXGRP)
+                        
+                        os.chmod(file_path, new_mode)
+            
+            print("Linux/macOS permissions set: chmod ug+rwx (recursive)")
+            return True
+            
+    except Exception as e:
+        print(f"Error setting permissions: {e}")
+        return False
+
+
+def get_files_from_path(input_path):
+    """
+    Get list of files from a path (file or directory)
+    Only returns archive files (ZIP, RAR, 7Z)
+    """
+    file_paths = []
+    
+    if os.path.isfile(input_path):
+        # Check if it's an archive
+        file_ext = os.path.splitext(input_path)[1].lower()
+        if file_ext in ['.zip', '.7z', '.rar']:
+            file_paths.append(input_path)
+        else:
+            print(f"Error: '{input_path}' is not a supported archive file!")
+            print("This tool only scans archive files (ZIP, 7Z, RAR)")
+            return []
+    elif os.path.isdir(input_path):
+        # Directory - get all archive files
+        for root, dirs, files in os.walk(input_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                file_ext = os.path.splitext(file)[1].lower()
+                
+                if file_ext in ['.zip', '.7z', '.rar']:
+                    # Skip files larger than VirusTotal limit
+                    try:
+                        file_size = os.path.getsize(file_path)
+                        if file_size <= 650 * 1024 * 1024:  # 650MB limit
+                            file_paths.append(file_path)
+                        else:
+                            print(f"Skipping large file: {file} ({format_bytes(file_size)})")
+                    except:
+                        continue
+    else:
+        print(f"Error: Path '{input_path}' does not exist")
+        return []
+    
+    return file_paths
 
 
 def confirm_action(prompt):
@@ -635,146 +727,206 @@ def print_warning_box(message):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Upload files to VirusTotal with mandatory safety checks',
+        description='VirusTotal Archive Scanner - Scan archive files with optimal safety and efficiency',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-SAFETY POLICY:
-• Files are ALWAYS scanned before any extraction
-• Extraction is BLOCKED if ANY threats are detected
-• No force-extract option exists for safety
+ARCHIVE SCANNER:
+• Only processes ZIP, RAR, and 7Z files
+• Calculates hash locally (SAFE for archives)
+• Only uploads files that don't exist in VirusTotal
+• Extracts archives only if they are safe
+
+Safety Design:
+• Local hash calculation is SAFE for archive files
+• Mimics VirusTotal web interface behavior
+• Maximum efficiency - avoids unnecessary uploads
 
 Examples:
-  %(prog)s YOUR_API_KEY document.pdf
-  %(prog)s YOUR_API_KEY archive.zip --extract-to ./output
+  %(prog)s YOUR_API_KEY archive.zip
+  %(prog)s YOUR_API_KEY ./archives_folder --extract-to ./output
+  %(prog)s YOUR_API_KEY archive.rar --extract-to ./output --unblock
         """
     )
 
     parser.add_argument('api_key', help='VirusTotal API key')
-    parser.add_argument('file', help='File to scan')
+    parser.add_argument('path', help='Archive file or folder containing archives to scan')
     parser.add_argument('--extract-to', metavar='DIRECTORY',
-                        help='Extract archive to this directory (only if file is safe)')
+                        help='Extract ALL archives to this directory (only if safe). Files extracted directly to this directory, no subfolders.')
+    parser.add_argument('--unblock', action='store_true',
+                        help='Set full permissions on extracted files (chmod ug+rwx on Linux, full control on Windows)')
 
     args = parser.parse_args()
 
-    # Check if file exists
-    if not os.path.exists(args.file):
-        print(f"Error: File '{args.file}' not found!")
-        sys.exit(1)
-
-    # Check file size (VirusTotal has limits)
-    file_size = os.path.getsize(args.file)
-    if file_size > 650 * 1024 * 1024:  # 650MB VirusTotal limit
-        print(f"Error: File too large ({format_bytes(file_size)})")
-        print("VirusTotal maximum file size is 650MB")
+    # Check if path exists
+    if not os.path.exists(args.path):
+        print(f"Error: Path '{args.path}' not found!")
         sys.exit(1)
 
     # Initialize scanner
     scanner = VirusTotalScanner(args.api_key)
 
-    # File information
-    file_ext = os.path.splitext(args.file)[1].lower()
-    is_archive = file_ext in ['.zip', '.7z', '.rar']
-
-    print(f"File: {os.path.basename(args.file)}")
-    print(f"Size: {format_bytes(file_size)}")
-
-    if file_size > scanner.large_file_threshold:
-        print(f"Type: Large file (>32MB)")
-    elif is_archive:
-        print(f"Type: {file_ext.upper()} Archive")
-        if args.extract_to:
-            print(f"Extract to: {args.extract_to}")
+    # Get all archive files from the path
+    print(f"Source: {args.path}")
+    if os.path.isdir(args.path):
+        print(f"Type: Directory (scanning for archives only)")
     else:
-        print(f"Type: Regular file")
-
+        file_ext = os.path.splitext(args.path)[1].lower()
+        print(f"Type: {file_ext.upper()} Archive")
+    
+    if args.extract_to:
+        print(f"Extract to: {args.extract_to} (all archives extracted directly here)")
+    if args.unblock:
+        print(f"Permission setting: Enabled")
+    
     print("\n" + "="*60)
-
-    # Step 1: Scan the file (check existing first, upload if needed)
-    file_hash, analysis_data, is_existing = scanner.scan_file(args.file)
-
-    if not analysis_data:
-        print("Failed to get analysis results")
+    
+    # Get list of archive files to scan
+    file_paths = get_files_from_path(args.path)
+    
+    if not file_paths:
+        print("No archive files found to scan")
         sys.exit(1)
+    
+    print(f"Found {len(file_paths)} archive file(s) to scan")
+    
+    # Statistics
+    total_files = len(file_paths)
+    safe_files = 0
+    unsafe_files = 0
+    failed_files = 0
+    extracted_archives = 0
+    
+    # Create main extraction directory if specified
+    main_extract_dir = args.extract_to
+    if main_extract_dir:
+        os.makedirs(main_extract_dir, exist_ok=True)
+        print(f"\nAll safe archives will be extracted directly to: {main_extract_dir}")
+        print("(No subfolders will be created for individual archives)")
+    
+    # Scan each file
+    for i, file_path in enumerate(file_paths, 1):
+        print(f"\n{'='*60}")
+        print(f"SCANNING ARCHIVE {i}/{total_files}")
+        print(f"{'='*60}")
+        
+        file_name = os.path.basename(file_path)
+        
+        # Check file size (VirusTotal has limits)
+        try:
+            file_size = os.path.getsize(file_path)
+            if file_size > 650 * 1024 * 1024:
+                print(f"Skipping: {file_name} (too large: {format_bytes(file_size)})")
+                failed_files += 1
+                continue
+        except:
+            print(f"Skipping: {file_name} (cannot access)")
+            failed_files += 1
+            continue
+        
+        # Scan the file - uses optimal web interface approach
+        file_hash, analysis_data, is_existing = scanner.scan_file(file_path)
 
-    if is_existing:
-        print("\nNote: Using existing analysis from VirusTotal database")
+        if not analysis_data:
+            print(f"Failed to get analysis for: {file_name}")
+            failed_files += 1
+            continue
 
-    # Step 2: Display results and check safety
-    total_detections = scanner.display_results(analysis_data, file_hash)
-
-    # Step 3: Handle extraction based on safety
-    if is_archive and args.extract_to:
-        print("\n" + "="*60)
-        print("ARCHIVE EXTRACTION")
-        print("="*60)
-
-        if total_detections > 0:
-            # UNSAFE - BLOCK EXTRACTION
-            print_warning_box(f"""
+        # Display results
+        total_detections = scanner.display_results(analysis_data, file_hash)
+        
+        # Check if we should extract
+        should_extract = main_extract_dir is not None
+        
+        if should_extract:
+            print(f"\n{'='*60}")
+            print(f"ARCHIVE PROCESSING: {file_name}")
+            print(f"{'='*60}")
+            
+            if total_detections > 0:
+                # UNSAFE - BLOCK EXTRACTION
+                print_warning_box(f"""
 EXTRACTION BLOCKED!
 This archive has {total_detections} threat detection(s).
 
-File SHA-256: {file_hash}
+File: {file_name}
+SHA-256: {file_hash}
 
 SAFETY ACTION:
 • Archive will NOT be extracted
-• Consider deleting this file
-• Do not attempt to extract manually
 • Handle with extreme caution
-            """)
-
-            # Show recommendations
-            print("Recommended actions:")
-            print("1. Delete the file immediately")
-            print("2. If needed for analysis, use a sandboxed VM")
-            print("3. Do not open or execute any contents")
-
-        else:
-            # SAFE - Allow extraction
-            print("Archive is clean - Safe to extract")
-            if file_hash:
-                print(f"File SHA-256: {file_hash}")
-
-            if confirm_action("Proceed with extraction?"):
-                extract_dir = extract_archive(args.file, args.extract_to)
-                if extract_dir:
-                    print(f"\nArchive successfully extracted to: {
-                          extract_dir}")
-                else:
-                    print("\nExtraction failed")
+                """)
+                unsafe_files += 1
+                
             else:
-                print("Extraction cancelled by user")
-
-    elif is_archive and not args.extract_to:
-        # Archive but no extraction requested
-        if total_detections > 0:
-            print_warning_box(f"""
-WARNING: UNSAFE ARCHIVE DETECTED
-This file has {total_detections} threat detection(s).
-
-File SHA-256: {file_hash}
-
-Recommendation: Delete this file immediately.
-            """)
+                # SAFE - Extract
+                print(f"Archive is clean - Safe to extract")
+                print(f"File SHA-256: {file_hash}")
+                
+                # Extract directly to the main directory (no subfolder)
+                print(f"Extracting directly to: {main_extract_dir}")
+                
+                extract_dir = extract_archive(file_path, main_extract_dir)
+                if extract_dir:
+                    print(f"Archive successfully extracted to main directory")
+                    extracted_archives += 1
+                    safe_files += 1
+                    
+                    # Apply permission unblocking if requested
+                    if args.unblock:
+                        print(f"\nSetting permissions on extracted files...")
+                        success = unblock_files_and_dirs(main_extract_dir)
+                        if success:
+                            print(f"Permissions successfully set on {main_extract_dir}")
+                        else:
+                            print(f"Warning: Could not set all permissions")
+                else:
+                    print(f"Extraction failed")
+                    failed_files += 1
+                    
         else:
-            if file_hash:
-                print(f"\nFile SHA-256: {file_hash}")
-            print("Note: Archive is clean but not extracted")
-            print("Use --extract-to DIR to extract contents")
-
-    else:
-        # Regular file scan
-        if total_detections > 0:
-            print_warning_box(f"""
-WARNING: UNSAFE FILE DETECTED
-This file has {total_detections} threat detection(s).
-
-File SHA-256: {file_hash}
+            # Archive scan without extraction request
+            if total_detections > 0:
+                print_warning_box(f"""
+WARNING: UNSAFE ARCHIVE DETECTED
+File: {file_name}
+Detections: {total_detections}
+SHA-256: {file_hash}
 
 Recommendation: Delete this file immediately.
-            """)
-        elif file_hash:
-            print(f"\nFile SHA-256: {file_hash}")
+                """)
+                unsafe_files += 1
+            else:
+                print(f"\nArchive is clean: {file_name}")
+                safe_files += 1
+        
+        # Small delay between files to avoid rate limiting
+        if i < total_files:
+            print(f"\n{'='*60}")
+            print("Waiting 2 seconds before next file...")
+            print(f"{'='*60}")
+            time.sleep(2)
+    
+    # Print summary
+    print(f"\n{'='*60}")
+    print("SCAN SUMMARY")
+    print(f"{'='*60}")
+    print(f"Total archives scanned: {total_files}")
+    print(f"  Safe archives: {safe_files}")
+    print(f"  Unsafe archives: {unsafe_files}")
+    print(f"  Failed archives: {failed_files}")
+    
+    if main_extract_dir:
+        print(f"Archives extracted: {extracted_archives}")
+        print(f"All safe archives extracted directly to: {main_extract_dir}")
+    
+    if unsafe_files > 0:
+        print(f"\nWARNING: {unsafe_files} unsafe archive(s) detected!")
+        print("Recommendation: Delete or quarantine unsafe archives.")
+    
+    if main_extract_dir:
+        print(f"\nExtracted files location: {main_extract_dir}")
+        print("Note: All archives were extracted directly to this directory")
+        print("      No subfolders were created for individual archives")
 
 
 if __name__ == "__main__":

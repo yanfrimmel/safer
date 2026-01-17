@@ -1,76 +1,62 @@
 # Safer
 
-Command-line tool to scan files with VirusTotal API. Extracts archives only if safe.
-I made this for my personal use for automating the processes of scanning downloaded archive files with VirusTotal and extracting.
+## Overview
+Safer is a command-line tool that scans archive files (ZIP, RAR, 7Z) with VirusTotal before extraction. It ensures potentially dangerous archives are identified and blocked before their contents can be accessed.
+
+## Installation
+
+### Prerequisites
+- Python 3.6+
+- VirusTotal API key (get from [virustotal.com](https://www.virustotal.com))
+- 7-Zip installed for extraction
+
+### Install 7-Zip
+- **Windows**: Download from [7-zip.org](https://www.7-zip.org/)
+- **Linux**: `sudo apt install p7zip-full` (Debian/Ubuntu) or `sudo yum install p7zip` (RHEL)
+- **macOS**: `brew install p7zip`
 
 ## Quick Start
 
+### Scan a single archive
 ```bash
-# Install dependencies
-pip install requests
-
-# Install 7-Zip (choose your OS)
-# Windows: Download from 7-zip.org
-# Ubuntu: sudo apt install p7zip-full
-# macOS: brew install p7zip
-
-# Get API key: https://virustotal.com/gui/join-us
+python safer.py YOUR_API_KEY archive.zip
 ```
 
-## Usage
-
+### Scan all archives in a folder
 ```bash
-# Scan any file
-python vt_scanner.py YOUR_API_KEY file.exe
-
-# Scan archive (no extraction)
-python vt_scanner.py YOUR_API_KEY archive.zip
-
-# Extract only if safe
-python vt_scanner.py YOUR_API_KEY archive.zip --extract-to ./output
+python safer.py YOUR_API_KEY ./downloads
 ```
 
-## Safety Features
-
-- **Always scans first** - File uploaded to VirusTotal before any processing
-- **Blocks unsafe extraction** - If ANY threats detected, extraction is blocked
-- **No force option** - Cannot bypass safety checks
-- **Clear warnings** - Prominent alerts for dangerous files
-
-## Examples
-
-**Clean file:**
-```
-FILE IS CLEAN
-Security Vendors Scanned: 62
-Vendors Detected Threats: 0
+### Extract safe archives
+```bash
+python safer.py YOUR_API_KEY archive.zip --extract-to ./output
 ```
 
-**Dangerous file (extraction blocked):**
-```
-UNSAFE FILE DETECTED
-Security Vendors Scanned: 65  
-Vendors Detected Threats: 42
-
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! EXTRACTION BLOCKED!                              !
-! This archive has 42 threat detection(s).         !
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+### Extract with full permissions
+```bash
+python safer.py YOUR_API_KEY archive.zip --extract-to ./output --unblock
 ```
 
-## Arguments
+## Features
+- **Archive-only scanning**: Only processes ZIP, RAR, and 7Z files
+- **Smart checking**: Calculates hash locally (safe for archives) and checks VirusTotal database first
+- **Safe extraction**: Archives are only extracted if VirusTotal confirms they're clean
+- **Permission control**: Option to set full permissions on extracted files
+- **Bulk processing**: Scan individual files or entire folders
 
-- `api_key` - Your VirusTotal API key (required)
-- `file` - File to scan (required)
-- `--extract-to DIR` - Extract archive here if safe (optional)
+## Safety Design
+- Local hash calculation is safe for archive files (no content execution)
+- Mimics VirusTotal web interface behavior
+- Blocks extraction if any threats are detected
+- No force-extract option exists for maximum safety
 
-## File Limits
+## Command Line Options
+- `api_key`: Your VirusTotal API key (required)
+- `path`: Archive file or folder containing archives (required)
+- `--extract-to DIRECTORY`: Extract safe archives to this directory (all files go directly here, no subfolders)
+- `--unblock`: Set full permissions on extracted files (chmod ug+rwx on Linux, full control on Windows)
 
-- Max size: 650MB (VirusTotal limit)
-- Supported archives: .zip, .7z, .rar
-- Requires 7-Zip installed
-
-## API Limits
-
-- Free tier: 500 requests/day, 4/minute
-- Wait 15 seconds between requests if limited
+## Notes
+- Large files may take time to upload and analyze
+- Rate limits apply based on your VirusTotal account type
+- Maximum file size: 650MB (VirusTotal limit)
