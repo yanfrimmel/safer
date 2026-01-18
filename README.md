@@ -24,7 +24,7 @@ python safer.py YOUR_API_KEY archive.zip
 
 ### Scan all archives in a folder
 ```bash
-python safer.py YOUR_API_KEY ./downloads
+python safer.py YOUR_API_KEY ./Downloads
 ```
 
 ### Extract safe archives
@@ -37,12 +37,18 @@ python safer.py YOUR_API_KEY archive.zip --extract-to ./output
 python safer.py YOUR_API_KEY archive.zip --extract-to ./output --unblock
 ```
 
+### Extract all archives in a folder with full permissions
+```bash
+python safer.py YOUR_API_KEY ~/Downloads --extract-to ./output --unblock
+```
+
 ## Features
 - **Archive-only scanning**: Only processes ZIP, RAR, and 7Z files
 - **Smart checking**: Calculates hash locally (safe for archives) and checks VirusTotal database first
 - **Safe extraction**: Archives are only extracted if VirusTotal confirms they're clean
 - **Permission control**: Option to set full permissions on extracted files
 - **Bulk processing**: Scan individual files or entire folders
+- **Extraction overwrite tracking**: Shows new vs updated files, **automatically overwrites** existing files
 
 ## Safety Design
 - Local hash calculation is safe for archive files (no content execution)

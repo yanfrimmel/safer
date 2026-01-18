@@ -492,7 +492,7 @@ def check_7z_installed():
 
 
 def extract_archive(archive_path, extract_dir=None):
-    """Extract archive using 7z command-line tool"""
+    """Extract archive using 7z command-line tool, track new and updated files"""
     if not check_7z_installed():
         print("Error: 7z is not installed or not in PATH")
         print("Please install 7-Zip:")
@@ -521,13 +521,20 @@ def extract_archive(archive_path, extract_dir=None):
     print(f"Destination: {extract_dir}")
 
     try:
-        # Get list of files BEFORE extraction
-        existing_files = set()
+        # Get list of files and their modification times BEFORE extraction
+        existing_files_info = {}
         if not is_temp and os.path.exists(extract_dir):
             for root, dirs, files in os.walk(extract_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
-                    existing_files.add(os.path.relpath(file_path, extract_dir))
+                    rel_path = os.path.relpath(file_path, extract_dir)
+                    # Normalize path for consistent comparison
+                    norm_path = os.path.normpath(rel_path)
+                    existing_files_info[norm_path] = {
+                        'path': file_path,
+                        'mtime': os.path.getmtime(file_path),
+                        'size': os.path.getsize(file_path)
+                    }
 
         result = subprocess.run(
             ['7z', 'x', archive_path, f'-o{extract_dir}', '-y'],
@@ -538,44 +545,85 @@ def extract_archive(archive_path, extract_dir=None):
         )
 
         if result.returncode == 0:
-            extracted_files = []
-            total_size = 0
+            new_files = []
+            updated_files = []
+            total_new_size = 0
+            total_updated_size = 0
 
-            # Get list of files AFTER extraction
+            # Check files after extraction
             for root, dirs, files in os.walk(extract_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
                     rel_path = os.path.relpath(file_path, extract_dir)
+                    norm_path = os.path.normpath(rel_path)
 
-                    # Only count files that weren't there before
-                    if is_temp or rel_path not in existing_files:
-                        file_size = os.path.getsize(file_path)
-                        extracted_files.append(file_path)
-                        total_size += file_size
+                    current_mtime = os.path.getmtime(file_path)
+                    current_size = os.path.getsize(file_path)
 
-            if extracted_files:
+                    if norm_path not in existing_files_info:
+                        # Brand new file
+                        new_files.append({
+                            'path': file_path,
+                            'rel_path': rel_path,
+                            'size': current_size
+                        })
+                        total_new_size += current_size
+                    else:
+                        # File existed before - check if it was modified
+                        old_info = existing_files_info[norm_path]
+                        if (current_mtime > old_info['mtime'] + 1 or  # Modified (1 second tolerance)
+                                # Or size changed
+                                current_size != old_info['size']):
+                            updated_files.append({
+                                'path': file_path,
+                                'rel_path': rel_path,
+                                'size': current_size,
+                                'old_size': old_info['size']
+                            })
+                            total_updated_size += current_size
+
+            total_affected = len(new_files) + len(updated_files)
+
+            if total_affected > 0:
                 print(f"Extraction successful")
-                print(f"Extracted {len(extracted_files)} NEW file(s), total: {
-                      format_bytes(total_size)}")
+                print(f"Files affected: {total_affected}")
 
-                print("\nExtracted files (first 10):")
-                for i, file_path in enumerate(extracted_files[:10]):
-                    rel_path = os.path.relpath(file_path, extract_dir)
-                    size = os.path.getsize(file_path)
-                    print(f"  {i+1:2d}. {rel_path} ({format_bytes(size)})")
+                if new_files:
+                    print(f"  New files added: {
+                          len(new_files)} ({format_bytes(total_new_size)})")
 
-                if len(extracted_files) > 10:
-                    print(f"  ... and {len(extracted_files) - 10} more files")
+                if updated_files:
+                    print(f"  Files updated: {len(updated_files)} ({
+                          format_bytes(total_updated_size)})")
+
+                # Show some examples
+                print("\nSample of affected files:")
+                sample_count = 0
+
+                # Show new files first
+                for i, file_info in enumerate(new_files[:5]):
+                    print(f"  [+] {file_info['rel_path']
+                                   } ({format_bytes(file_info['size'])})")
+                    sample_count += 1
+
+                # Then updated files
+                for i, file_info in enumerate(updated_files[:5 - sample_count]):
+                    size_change = ""
+                    if file_info['size'] != file_info['old_size']:
+                        diff = file_info['size'] - file_info['old_size']
+                        sign = "+" if diff > 0 else ""
+                        size_change = f" [size: {format_bytes(file_info['old_size'])} → {format_bytes(
+                            file_info['size'])} ({sign}{format_bytes(abs(diff))})]"
+                    print(f"  [↻] {file_info['rel_path']}{size_change}")
+
+                if total_affected > 10:
+                    print(f"  ... and {total_affected - 10} more files")
 
                 return extract_dir
             else:
-                print("No new files found after extraction")
-                if is_temp:
-                    try:
-                        shutil.rmtree(extract_dir)
-                    except:
-                        pass
-                return None
+                print("No files were added or modified by this extraction")
+                print("(All files in the archive already exist with same content)")
+                return extract_dir
         else:
             print(f"Extraction failed with code: {result.returncode}")
             if result.stderr:
