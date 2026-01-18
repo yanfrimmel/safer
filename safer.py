@@ -50,21 +50,21 @@ class VirusTotalScanner:
         # Step 1: Calculate hash locally (SAFE for archives)
         print("Calculating file hash (safe for archives)...")
         file_hash = self.calculate_file_hash(file_path)
-        
+
         if not file_hash:
             print("Failed to calculate hash, uploading file directly...")
             return self._upload_and_scan(file_path, file_size)
-        
+
         print(f"File SHA-256: {file_hash}")
-        
+
         # Step 2: Check if file already exists in VirusTotal database
         print("Checking if file exists in VirusTotal database...")
         existing_analysis = self._get_existing_analysis(file_hash)
-        
+
         if existing_analysis:
             print("✓ File found in database! Using existing analysis.")
             return file_hash, existing_analysis, True
-        
+
         # Step 3: File doesn't exist, upload it
         print("File not found in database. Uploading for analysis...")
         return self._upload_and_scan(file_path, file_size, file_hash)
@@ -85,7 +85,7 @@ class VirusTotalScanner:
                 return None, None, False
 
             analysis_id, uploaded_hash, analysis_data = result
-            
+
             # Use the hash we know or the one from upload
             final_hash = known_hash or uploaded_hash
 
@@ -184,7 +184,7 @@ class VirusTotalScanner:
 
                     if 'results' in attributes or 'last_analysis_results' in attributes:
                         print("✓ File uploaded with immediate analysis results")
-                        
+
                         analysis_data = {
                             'data': {
                                 'id': analysis_id or 'immediate',
@@ -288,7 +288,7 @@ class VirusTotalScanner:
                             analysis_data['data']['attributes']['stats'] = stats
 
                         return analysis_data
-                    
+
             return None
 
         except Exception as e:
@@ -521,6 +521,14 @@ def extract_archive(archive_path, extract_dir=None):
     print(f"Destination: {extract_dir}")
 
     try:
+        # Get list of files BEFORE extraction
+        existing_files = set()
+        if not is_temp and os.path.exists(extract_dir):
+            for root, dirs, files in os.walk(extract_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    existing_files.add(os.path.relpath(file_path, extract_dir))
+
         result = subprocess.run(
             ['7z', 'x', archive_path, f'-o{extract_dir}', '-y'],
             capture_output=True,
@@ -533,16 +541,21 @@ def extract_archive(archive_path, extract_dir=None):
             extracted_files = []
             total_size = 0
 
+            # Get list of files AFTER extraction
             for root, dirs, files in os.walk(extract_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
-                    file_size = os.path.getsize(file_path)
-                    extracted_files.append(file_path)
-                    total_size += file_size
+                    rel_path = os.path.relpath(file_path, extract_dir)
+
+                    # Only count files that weren't there before
+                    if is_temp or rel_path not in existing_files:
+                        file_size = os.path.getsize(file_path)
+                        extracted_files.append(file_path)
+                        total_size += file_size
 
             if extracted_files:
                 print(f"Extraction successful")
-                print(f"Extracted {len(extracted_files)} file(s), total: {
+                print(f"Extracted {len(extracted_files)} NEW file(s), total: {
                       format_bytes(total_size)}")
 
                 print("\nExtracted files (first 10):")
@@ -556,7 +569,7 @@ def extract_archive(archive_path, extract_dir=None):
 
                 return extract_dir
             else:
-                print("No files found after extraction")
+                print("No new files found after extraction")
                 if is_temp:
                     try:
                         shutil.rmtree(extract_dir)
@@ -586,77 +599,80 @@ def unblock_files_and_dirs(path):
     Windows: icacls (grant full control)
     """
     print(f"Setting permissions on: {path}")
-    
+
     if not os.path.exists(path):
         print(f"Warning: Path does not exist: {path}")
         return False
-    
+
     try:
         if sys.platform.startswith('win'):
             # Windows: Grant full control to current user
             username = os.getlogin()
-            
+
             # Use icacls command
             cmd = f'icacls "{path}" /grant "{username}:(OI)(CI)F" /T /Q'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True)
+
             if result.returncode == 0:
                 print(f"Windows permissions set for user '{username}'")
                 return True
             else:
                 print(f"Windows permission setting failed: {result.stderr}")
-                
+
                 # Fallback: Try basic Python method
                 try:
                     # Make writable using Python
                     os.chmod(path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
-                    
+
                     # If it's a directory, apply recursively
                     if os.path.isdir(path):
                         for root, dirs, files in os.walk(path):
                             for dir_name in dirs:
                                 dir_path = os.path.join(root, dir_name)
-                                os.chmod(dir_path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                                os.chmod(dir_path, stat.S_IWRITE |
+                                         stat.S_IREAD | stat.S_IEXEC)
                             for file_name in files:
                                 file_path = os.path.join(root, file_name)
-                                os.chmod(file_path, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
-                    
+                                os.chmod(file_path, stat.S_IWRITE |
+                                         stat.S_IREAD | stat.S_IEXEC)
+
                     print("Fallback permissions set (basic Python method)")
                     return True
-                    
+
                 except Exception as e:
                     print(f"Fallback permission setting failed: {e}")
                     return False
-                    
+
         else:
             # Linux/macOS: Use chmod
             # First set permissions on the item itself
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR |  # User: rwx
-                             stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP)  # Group: rwx
-            
+                     stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP)  # Group: rwx
+
             # If it's a directory, apply recursively
             if os.path.isdir(path):
                 for root, dirs, files in os.walk(path):
                     for dir_name in dirs:
                         dir_path = os.path.join(root, dir_name)
                         os.chmod(dir_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR |
-                                         stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP)
+                                 stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP)
                     for file_name in files:
                         file_path = os.path.join(root, file_name)
                         # For files, keep execute bit only if it was already executable
                         current_mode = os.stat(file_path).st_mode
                         new_mode = (stat.S_IRUSR | stat.S_IWUSR |  # User: rw
                                     stat.S_IRGRP | stat.S_IWGRP)   # Group: rw
-                        
+
                         # Preserve execute bits if they exist
                         if current_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
                             new_mode |= (stat.S_IXUSR | stat.S_IXGRP)
-                        
+
                         os.chmod(file_path, new_mode)
-            
+
             print("Linux/macOS permissions set: chmod ug+rwx (recursive)")
             return True
-            
+
     except Exception as e:
         print(f"Error setting permissions: {e}")
         return False
@@ -668,7 +684,7 @@ def get_files_from_path(input_path):
     Only returns archive files (ZIP, RAR, 7Z)
     """
     file_paths = []
-    
+
     if os.path.isfile(input_path):
         # Check if it's an archive
         file_ext = os.path.splitext(input_path)[1].lower()
@@ -684,7 +700,7 @@ def get_files_from_path(input_path):
             for file in files:
                 file_path = os.path.join(root, file)
                 file_ext = os.path.splitext(file)[1].lower()
-                
+
                 if file_ext in ['.zip', '.7z', '.rar']:
                     # Skip files larger than VirusTotal limit
                     try:
@@ -692,13 +708,14 @@ def get_files_from_path(input_path):
                         if file_size <= 650 * 1024 * 1024:  # 650MB limit
                             file_paths.append(file_path)
                         else:
-                            print(f"Skipping large file: {file} ({format_bytes(file_size)})")
+                            print(f"Skipping large file: {
+                                  file} ({format_bytes(file_size)})")
                     except:
                         continue
     else:
         print(f"Error: Path '{input_path}' does not exist")
         return []
-    
+
     return file_paths
 
 
@@ -749,7 +766,8 @@ Examples:
     )
 
     parser.add_argument('api_key', help='VirusTotal API key')
-    parser.add_argument('path', help='Archive file or folder containing archives to scan')
+    parser.add_argument(
+        'path', help='Archive file or folder containing archives to scan')
     parser.add_argument('--extract-to', metavar='DIRECTORY',
                         help='Extract ALL archives to this directory (only if safe). Files extracted directly to this directory, no subfolders.')
     parser.add_argument('--unblock', action='store_true',
@@ -772,57 +790,60 @@ Examples:
     else:
         file_ext = os.path.splitext(args.path)[1].lower()
         print(f"Type: {file_ext.upper()} Archive")
-    
+
     if args.extract_to:
-        print(f"Extract to: {args.extract_to} (all archives extracted directly here)")
+        print(f"Extract to: {
+              args.extract_to} (all archives extracted directly here)")
     if args.unblock:
         print(f"Permission setting: Enabled")
-    
+
     print("\n" + "="*60)
-    
+
     # Get list of archive files to scan
     file_paths = get_files_from_path(args.path)
-    
+
     if not file_paths:
         print("No archive files found to scan")
         sys.exit(1)
-    
+
     print(f"Found {len(file_paths)} archive file(s) to scan")
-    
+
     # Statistics
     total_files = len(file_paths)
     safe_files = 0
     unsafe_files = 0
     failed_files = 0
     extracted_archives = 0
-    
+
     # Create main extraction directory if specified
     main_extract_dir = args.extract_to
     if main_extract_dir:
         os.makedirs(main_extract_dir, exist_ok=True)
-        print(f"\nAll safe archives will be extracted directly to: {main_extract_dir}")
+        print(f"\nAll safe archives will be extracted directly to: {
+              main_extract_dir}")
         print("(No subfolders will be created for individual archives)")
-    
+
     # Scan each file
     for i, file_path in enumerate(file_paths, 1):
         print(f"\n{'='*60}")
         print(f"SCANNING ARCHIVE {i}/{total_files}")
         print(f"{'='*60}")
-        
+
         file_name = os.path.basename(file_path)
-        
+
         # Check file size (VirusTotal has limits)
         try:
             file_size = os.path.getsize(file_path)
             if file_size > 650 * 1024 * 1024:
-                print(f"Skipping: {file_name} (too large: {format_bytes(file_size)})")
+                print(f"Skipping: {file_name} (too large: {
+                      format_bytes(file_size)})")
                 failed_files += 1
                 continue
         except:
             print(f"Skipping: {file_name} (cannot access)")
             failed_files += 1
             continue
-        
+
         # Scan the file - uses optimal web interface approach
         file_hash, analysis_data, is_existing = scanner.scan_file(file_path)
 
@@ -833,15 +854,15 @@ Examples:
 
         # Display results
         total_detections = scanner.display_results(analysis_data, file_hash)
-        
+
         # Check if we should extract
         should_extract = main_extract_dir is not None
-        
+
         if should_extract:
             print(f"\n{'='*60}")
             print(f"ARCHIVE PROCESSING: {file_name}")
             print(f"{'='*60}")
-            
+
             if total_detections > 0:
                 # UNSAFE - BLOCK EXTRACTION
                 print_warning_box(f"""
@@ -856,33 +877,34 @@ SAFETY ACTION:
 • Handle with extreme caution
                 """)
                 unsafe_files += 1
-                
+
             else:
                 # SAFE - Extract
                 print(f"Archive is clean - Safe to extract")
                 print(f"File SHA-256: {file_hash}")
-                
+
                 # Extract directly to the main directory (no subfolder)
                 print(f"Extracting directly to: {main_extract_dir}")
-                
+
                 extract_dir = extract_archive(file_path, main_extract_dir)
                 if extract_dir:
                     print(f"Archive successfully extracted to main directory")
                     extracted_archives += 1
                     safe_files += 1
-                    
+
                     # Apply permission unblocking if requested
                     if args.unblock:
                         print(f"\nSetting permissions on extracted files...")
                         success = unblock_files_and_dirs(main_extract_dir)
                         if success:
-                            print(f"Permissions successfully set on {main_extract_dir}")
+                            print(f"Permissions successfully set on {
+                                  main_extract_dir}")
                         else:
                             print(f"Warning: Could not set all permissions")
                 else:
                     print(f"Extraction failed")
                     failed_files += 1
-                    
+
         else:
             # Archive scan without extraction request
             if total_detections > 0:
@@ -898,14 +920,14 @@ Recommendation: Delete this file immediately.
             else:
                 print(f"\nArchive is clean: {file_name}")
                 safe_files += 1
-        
+
         # Small delay between files to avoid rate limiting
         if i < total_files:
             print(f"\n{'='*60}")
             print("Waiting 2 seconds before next file...")
             print(f"{'='*60}")
             time.sleep(2)
-    
+
     # Print summary
     print(f"\n{'='*60}")
     print("SCAN SUMMARY")
@@ -914,15 +936,15 @@ Recommendation: Delete this file immediately.
     print(f"  Safe archives: {safe_files}")
     print(f"  Unsafe archives: {unsafe_files}")
     print(f"  Failed archives: {failed_files}")
-    
+
     if main_extract_dir:
         print(f"Archives extracted: {extracted_archives}")
         print(f"All safe archives extracted directly to: {main_extract_dir}")
-    
+
     if unsafe_files > 0:
         print(f"\nWARNING: {unsafe_files} unsafe archive(s) detected!")
         print("Recommendation: Delete or quarantine unsafe archives.")
-    
+
     if main_extract_dir:
         print(f"\nExtracted files location: {main_extract_dir}")
         print("Note: All archives were extracted directly to this directory")
